@@ -703,88 +703,96 @@
   }
 
   // ---------- Spawning per room ----------
-  function spawnRoomContents(roomId) {
-    const node = getRoomNode(roomId);
-    const room = getRoom(roomId);
-    if (!node || !room || room.spawnDone) return;
-    room.spawnDone = true;
+  // REPLACE this entire function:  function spawnRoomContents(roomId) { ... }
+// (This version prevents repeated decal buildup + avoids “room stacking” behavior.)
+function spawnRoomContents(roomId) {
+  const node = getRoomNode(roomId);
+  const room = getRoom(roomId);
+  if (!node || !room) return;
 
-    // Decorative decals (neon signs)
-    const decoN = 8 + randi(0,10);
-    for (let i=0;i<decoN;i++) {
-      const x = rand(18, ROOM_W-18);
-      const y = rand(18, ROOM_H-18);
-      if (chance(0.6)) state.decals.push({ x,y, t:0, c: chance(0.5)?THEME.neonA:THEME.neonC });
-    }
+  // If we already spawned once, do nothing.
+  // (Room restore is handled by tryDoorTransition via room.__cache)
+  if (room.spawnDone) return;
+  room.spawnDone = true;
 
-    // special rooms
-    if (node.kind === "key" && !node.cleared) {
-      // Place a key pickup
-      state.pickups.push(makePickup("key", ROOM_W*0.5, ROOM_H*0.5, 1));
-      node.cleared = true;
-      room.cleared = true;
-      // doors open
-      for (const d of ["N","S","E","W"]) room.doorsOpen[d] = !!room.neighbors[d];
-      return;
-    }
+  // Fresh room should start clean (critical to avoid “glitchy mess”)
+  state.enemies.length = 0;
+  state.bullets.length = 0;
+  state.pickups.length = 0;
+  state.fx.length = 0;
+  state.decals.length = 0;
 
-    if (node.kind === "treasure" && !node.cleared) {
-      // spawn treasure chest -> after "open" yields item/weapon
-      state.pickups.push(makePickup("chest", ROOM_W*0.5, ROOM_H*0.5, 1, { opened:false }));
-      // treasure room isn't combat, doors open
-      for (const d of ["N","S","E","W"]) room.doorsOpen[d] = !!room.neighbors[d];
-      return;
-    }
-
-    if (node.kind === "shop" && !node.cleared) {
-      // spawn shop terminals as pickups to interact/buy
-      // We'll place 3 “shop slots” as interactables
-      const baseX = ROOM_W*0.5, baseY = ROOM_H*0.5;
-      for (let i=0;i<room.shopItems.length;i++){
-        state.pickups.push(makePickup("shop", baseX + (i-1)*44, baseY + 10, 1, { idx:i }));
-      }
-      // open doors always
-      for (const d of ["N","S","E","W"]) room.doorsOpen[d] = !!room.neighbors[d];
-      node.cleared = true; room.cleared = true;
-      return;
-    }
-
-    // combat rooms
-    const combat = (node.kind === "normal" || node.kind === "elite" || node.kind === "boss");
-    if (!combat || node.cleared) {
-      for (const d of ["N","S","E","W"]) room.doorsOpen[d] = !!room.neighbors[d];
-      return;
-    }
-
-    // lock doors for combat
-    for (const d of ["N","S","E","W"]) room.doorsOpen[d] = false;
-
-    const baseTier = 1 + Math.floor((state.floor-1)*0.45);
-    const count = node.kind === "boss" ? 1 : (node.kind === "elite" ? (7 + state.floor*2) : (5 + state.floor*2));
-    if (node.kind === "boss") {
-      const boss = makeEnemy("boss_proxy", ROOM_W*0.5, ROOM_H*0.45, baseTier);
-      state.enemies.push(boss);
-      state.bossAlive = true;
-      state.msg = "BOSS: MIRROR EXECUTOR";
-      state.msgT = 1.6;
-      return;
-    }
-
-    for (let i=0;i<count;i++){
-      const x = rand(40, ROOM_W-40);
-      const y = rand(30, ROOM_H-30);
-      let kinds = ["runner","shooter","drone","spitter","turret"];
-      if (state.floor>=2) kinds.push("brute");
-      let k = kinds[randi(0,kinds.length-1)];
-      const e = makeEnemy(k, x, y, baseTier);
-      // elite room => some elites
-      if (node.kind==="elite" && chance(0.35)) makeElite(e);
-      state.enemies.push(e);
-    }
-
-    state.msg = node.kind==="elite" ? "ELITE SECTOR" : "CLEAR THE ROOM";
-    state.msgT = 1.2;
+  // Decorative decals (neon signs)
+  const decoN = 8 + randi(0, 10);
+  for (let i = 0; i < decoN; i++) {
+    const x = rand(18, ROOM_W - 18);
+    const y = rand(18, ROOM_H - 18);
+    if (chance(0.6)) state.decals.push({ x, y, t: 0, c: chance(0.5) ? THEME.neonA : THEME.neonC });
   }
+
+  // Special rooms
+  if (node.kind === "key" && !node.cleared) {
+    state.pickups.push(makePickup("key", ROOM_W * 0.5, ROOM_H * 0.5, 1));
+    node.cleared = true;
+    room.cleared = true;
+    for (const d of ["N", "S", "E", "W"]) room.doorsOpen[d] = !!room.neighbors[d];
+    return;
+  }
+
+  if (node.kind === "treasure" && !node.cleared) {
+    state.pickups.push(makePickup("chest", ROOM_W * 0.5, ROOM_H * 0.5, 1, { opened: false }));
+    for (const d of ["N", "S", "E", "W"]) room.doorsOpen[d] = !!room.neighbors[d];
+    return;
+  }
+
+  if (node.kind === "shop" && !node.cleared) {
+    const baseX = ROOM_W * 0.5, baseY = ROOM_H * 0.5;
+    for (let i = 0; i < room.shopItems.length; i++) {
+      state.pickups.push(makePickup("shop", baseX + (i - 1) * 44, baseY + 10, 1, { idx: i }));
+    }
+    for (const d of ["N", "S", "E", "W"]) room.doorsOpen[d] = !!room.neighbors[d];
+    node.cleared = true;
+    room.cleared = true;
+    return;
+  }
+
+  // Combat rooms
+  const combat = (node.kind === "normal" || node.kind === "elite" || node.kind === "boss");
+  if (!combat || node.cleared) {
+    for (const d of ["N", "S", "E", "W"]) room.doorsOpen[d] = !!room.neighbors[d];
+    return;
+  }
+
+  // Lock doors for combat
+  for (const d of ["N", "S", "E", "W"]) room.doorsOpen[d] = false;
+
+  const baseTier = 1 + Math.floor((state.floor - 1) * 0.45);
+  const count = node.kind === "boss" ? 1 : (node.kind === "elite" ? (7 + state.floor * 2) : (5 + state.floor * 2));
+
+  if (node.kind === "boss") {
+    const boss = makeEnemy("boss_proxy", ROOM_W * 0.5, ROOM_H * 0.45, baseTier);
+    state.enemies.push(boss);
+    state.bossAlive = true;
+    state.msg = "BOSS: MIRROR EXECUTOR";
+    state.msgT = 1.6;
+    return;
+  }
+
+  for (let i = 0; i < count; i++) {
+    const x = rand(40, ROOM_W - 40);
+    const y = rand(30, ROOM_H - 30);
+    let kinds = ["runner", "shooter", "drone", "spitter", "turret"];
+    if (state.floor >= 2) kinds.push("brute");
+    let k = kinds[randi(0, kinds.length - 1)];
+    const e = makeEnemy(k, x, y, baseTier);
+    if (node.kind === "elite" && chance(0.35)) makeElite(e);
+    state.enemies.push(e);
+  }
+
+  state.msg = node.kind === "elite" ? "ELITE SECTOR" : "CLEAR THE ROOM";
+  state.msgT = 1.2;
+}
+
 
   // ---------- Physics helpers ----------
   function moveEntity(ent, dt, room) {
@@ -1173,56 +1181,101 @@
   }
 
   // ---------- Room transitions ----------
-  function tryDoorTransition(room) {
-    const node = getRoomNode(state.roomId);
-    if (!node) return;
+  // REPLACE this entire function:  function tryDoorTransition(room) { ... }
+function tryDoorTransition(room) {
+  const node = getRoomNode(state.roomId);
+  if (!node) return;
 
-    // Determine if player crosses an open doorway region
-    const nearTop = player.y < 8 && Math.abs(player.x - ROOM_W*0.5) < 18;
-    const nearBot = player.y > ROOM_H-8 && Math.abs(player.x - ROOM_W*0.5) < 18;
-    const nearLeft = player.x < 8 && Math.abs(player.y - ROOM_H*0.5) < 18;
-    const nearRight = player.x > ROOM_W-8 && Math.abs(player.y - ROOM_H*0.5) < 18;
+  // Detect doorway crossing
+  const nearTop   = player.y < 8 && Math.abs(player.x - ROOM_W * 0.5) < 18;
+  const nearBot   = player.y > ROOM_H - 8 && Math.abs(player.x - ROOM_W * 0.5) < 18;
+  const nearLeft  = player.x < 8 && Math.abs(player.y - ROOM_H * 0.5) < 18;
+  const nearRight = player.x > ROOM_W - 8 && Math.abs(player.y - ROOM_H * 0.5) < 18;
 
-    function go(dx,dy,dirFrom) {
-      const nx = node.x + dx, ny = node.y + dy;
-      const nid = roomKey(nx,ny);
-      const nextNode = getRoomNode(nid);
-      if (!nextNode) return;
+  // Save current room “live” arrays so re-entering doesn't stack/glitch
+  function stashRoom(roomId) {
+    const r = getRoom(roomId);
+    if (!r) return;
+    r.__cache = {
+      enemies: state.enemies.slice(),
+      bullets: state.bullets.slice(),
+      pickups: state.pickups.slice(),
+      fx: state.fx.slice(),
+      decals: state.decals.slice(),
+    };
+  }
 
-      // If entering treasure room via a locked connection, consume key
-      if (nextNode.kind === "treasure" && nextNode.locked && !nextNode.cleared) {
-        if (state.keys <= 0) {
-          state.msg = "TREASURE LOCKED — NEED KEY";
-          state.msgT = 1.0;
-          return;
-        }
-        state.keys -= 1;
-        nextNode.locked = false;
-        state.msg = "LOCK UNSEALED";
-        state.msgT = 1.0;
-      }
+  // Load next room arrays (or clear for fresh spawn)
+  function loadRoom(roomId) {
+    const r = getRoom(roomId);
+    if (!r) return;
 
-      state.roomId = nid;
-      nextNode.seen = true;
+    state.enemies.length = 0;
+    state.bullets.length = 0;
+    state.pickups.length = 0;
+    state.fx.length = 0;
+    state.decals.length = 0;
 
-      // reposition player to opposite side
-      if (dirFrom==="N") { player.y = ROOM_H - 14; }
-      if (dirFrom==="S") { player.y = 14; }
-      if (dirFrom==="W") { player.x = ROOM_W - 14; }
-      if (dirFrom==="E") { player.x = 14; }
-
-      // clear bullets in transit
-      state.bullets.length = 0;
-
-      // spawn
-      spawnRoomContents(state.roomId);
+    if (r.__cache) {
+      // Restore cached room state (prevents stacking/ghost rooms)
+      for (const e of r.__cache.enemies) state.enemies.push(e);
+      for (const b of r.__cache.bullets) state.bullets.push(b);
+      for (const p of r.__cache.pickups) state.pickups.push(p);
+      for (const f of r.__cache.fx) state.fx.push(f);
+      for (const d of r.__cache.decals) state.decals.push(d);
+      return;
     }
 
-    if (nearTop && room.neighbors.N && room.doorsOpen.N) go(0,-1,"N");
-    else if (nearBot && room.neighbors.S && room.doorsOpen.S) go(0, 1,"S");
-    else if (nearLeft && room.neighbors.W && room.doorsOpen.W) go(-1,0,"W");
-    else if (nearRight&& room.neighbors.E && room.doorsOpen.E) go( 1,0,"E");
+    // Fresh room => spawn contents once
+    spawnRoomContents(roomId);
   }
+
+  function go(dx, dy, dirFrom) {
+    const nx = node.x + dx, ny = node.y + dy;
+    const nid = roomKey(nx, ny);
+    const nextNode = getRoomNode(nid);
+    if (!nextNode) return;
+
+    // Treasure lock check (consume key only when entering)
+    if (nextNode.kind === "treasure" && nextNode.locked && !nextNode.cleared) {
+      if (state.keys <= 0) {
+        state.msg = "TREASURE LOCKED — NEED KEY";
+        state.msgT = 1.0;
+        return;
+      }
+      state.keys -= 1;
+      nextNode.locked = false;
+      state.msg = "LOCK UNSEALED";
+      state.msgT = 1.0;
+    }
+
+    // IMPORTANT: stash current room arrays BEFORE switching
+    stashRoom(state.roomId);
+
+    // Switch
+    state.roomId = nid;
+    nextNode.seen = true;
+
+    // Reposition player to opposite side
+    if (dirFrom === "N") { player.y = ROOM_H - 14; player.x = clamp(player.x, 14, ROOM_W - 14); }
+    if (dirFrom === "S") { player.y = 14;          player.x = clamp(player.x, 14, ROOM_W - 14); }
+    if (dirFrom === "W") { player.x = ROOM_W - 14; player.y = clamp(player.y, 14, ROOM_H - 14); }
+    if (dirFrom === "E") { player.x = 14;          player.y = clamp(player.y, 14, ROOM_H - 14); }
+
+    // Reset camera instantly to reduce “old room smear” feeling
+    state.cam.x = clamp(player.x - VIEW_W / 2, 0, ROOM_W - VIEW_W);
+    state.cam.y = clamp(player.y - VIEW_H / 2, 0, ROOM_H - VIEW_H);
+
+    // Load new room (restore cache OR spawn fresh)
+    loadRoom(state.roomId);
+  }
+
+  if (nearTop && room.neighbors.N && room.doorsOpen.N) go(0, -1, "N");
+  else if (nearBot && room.neighbors.S && room.doorsOpen.S) go(0,  1, "S");
+  else if (nearLeft && room.neighbors.W && room.doorsOpen.W) go(-1, 0, "W");
+  else if (nearRight && room.neighbors.E && room.doorsOpen.E) go(1,  0, "E");
+}
+
 
   // ---------- UI / Screens ----------
   let styleTag, menuWrap, gameWrap, uiWrap, hud, modal, mapBox;
@@ -1638,9 +1691,62 @@
       lctx.fillRect(sx-1,sy-1,2,2);
     }
 
-    // player
-    const pCol = player.invT>0 ? "rgba(255,255,255,0.95)" : "rgba(0,255,240,0.92)";
-    drawRect(player.x, player.y, 7, pCol, "rgba(0,0,0,0.45)");
+    // OPTIONAL (player spritework): QUICK PATCH inside drawRoom(room)
+// Find this block in drawRoom:
+//   // player
+//   const pCol = ...
+//   drawRect(player.x, player.y, 7, pCol, ...);
+//
+// REPLACE ONLY THAT PLAYER BLOCK with this pixel-sprite renderer:
+
+// player (16x16-ish pixel sprite)
+{
+  const camX = state.cam.x, camY = state.cam.y;
+  const sx = (player.x - camX) | 0;
+  const sy = (player.y - camY) | 0;
+
+  // 12x12 pixel “cyber runner” sprite (centered)
+  // 0 = transparent
+  // 1 = outline, 2 = suit, 3 = neon trim, 4 = visor
+  const SPR = [
+    "000011000000",
+    "000111100000",
+    "001122210000",
+    "001244210000",
+    "001222210000",
+    "000233200000",
+    "002222223000",
+    "022233222200",
+    "022200222200",
+    "002200022000",
+    "002200022000",
+    "000300030000",
+  ];
+
+  const col1 = (player.invT > 0) ? "rgba(255,255,255,0.95)" : "rgba(10,0,14,0.95)"; // outline
+  const col2 = "rgba(0,255,240,0.85)";   // suit
+  const col3 = "rgba(255,59,212,0.70)";  // neon trim
+  const col4 = "rgba(255,204,0,0.85)";   // visor
+
+  // center sprite on player
+  const ox = sx - 6;
+  const oy = sy - 6;
+
+  for (let y = 0; y < SPR.length; y++) {
+    const row = SPR[y];
+    for (let x = 0; x < row.length; x++) {
+      const c = row.charCodeAt(x) - 48;
+      if (c === 0) continue;
+      lctx.fillStyle = (c === 1) ? col1 : (c === 2) ? col2 : (c === 3) ? col3 : col4;
+      lctx.fillRect(ox + x, oy + y, 1, 1);
+    }
+  }
+
+  // tiny shadow
+  lctx.fillStyle = "rgba(0,0,0,0.35)";
+  lctx.fillRect(sx - 4, sy + 7, 8, 2);
+}
+
 
     // aim indicator
     {
