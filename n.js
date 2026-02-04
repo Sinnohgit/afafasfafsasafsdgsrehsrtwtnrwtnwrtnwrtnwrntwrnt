@@ -1,9 +1,9 @@
 /* n.js — ES5-safe single-file dungeon shooter (full-window)
-   Added:
-   a) Coins drop + Shop room on each depth ring (|x|+|y| = depth). Buy weapons/upgrades.
-   b) Door transition bugfix: transitions trigger when you PUSH into an open doorway (no need to cross OOB).
-   c) Full-window canvas with resize + HiDPI; optional fullscreen on first click / press F.
-   d) Better look: richer tile shading, soft lighting vignette, improved sprites/shadows, UI polish.
+   Updates:
+   - Full-window canvas (100vw/100vh) + HiDPI + crisp pixels
+   - Added peaceful rooms: Shop, Heal Fountain (free heal), Armory (rare free weapon)
+   - Watermark system (set WATERMARK_TEXT to YOUR OWN text; cannot add 3rd-party site branding)
+   - Improved spritework / tilework (cleaner pixel look + shading)
 */
 
 (function () {
@@ -12,9 +12,15 @@
   // ---------- Boot / Entry ----------
   window.create = function () { Game.create(); };
 
+  // ---------- Config ----------
+  // Put YOUR OWN watermark text here (e.g. "MyDungeonGame.com" / "My Studio" / etc.)
+  var WATERMARK_TEXT = "YOUR-SITE-OR-GAME-NAME";
+  var WATERMARK_ENABLED = true;
+
   // ---------- Constants ----------
   var TAU = Math.PI * 2;
 
+  // Pixel-art scale: canvas is HiDPI, but we render with crisp edges
   var TILE = 24;
   var ROOM_TW = 21;
   var ROOM_TH = 13;
@@ -31,19 +37,19 @@
 
   // Door opening geometry in pixels
   var DOOR_SPAN = 26;      // half-width of door opening around center
-  var DOOR_THICK = 18;     // thickness of doorway "trigger band" inside room
+  var DOOR_THICK = 18;     // thickness of doorway trigger band inside room
 
   // ---------- Canvas / Context ----------
   var canvas, ctx;
   var dpr = 1;
-  var VIEW_W = 960, VIEW_H = 540; // updated at resize
+  var VIEW_W = 960, VIEW_H = 540;
   var lastT = 0;
 
   // ---------- Input ----------
   var keys = {};
   var keysPressed = {};
   var mouse = { x: 0, y: 0, down: false };
-  var wantsAutoFullscreen = true;
+  var wantsAutoFullscreen = false; // you asked full-window; not forcing fullscreen anymore
 
   function onKeyDown(e) {
     if (!keys[e.keyCode]) keysPressed[e.keyCode] = true;
@@ -58,16 +64,8 @@
     mouse.x = (cx / rect.width) * VIEW_W;
     mouse.y = (cy / rect.height) * VIEW_H;
   }
-  function onMouseDown() {
-    mouse.down = true;
-    // best-effort: go fullscreen on first click (user gesture)
-    if (wantsAutoFullscreen) {
-      wantsAutoFullscreen = false;
-      requestFullscreen();
-    }
-  }
+  function onMouseDown() { mouse.down = true; }
   function onMouseUp() { mouse.down = false; }
-
   function wasPressed(code) { return !!keysPressed[code]; }
 
   // ---------- RNG ----------
@@ -100,8 +98,8 @@
     coins: 0,
     roomId: "0,0",
     cam: { x: 0, y: 0, shake: 0, shakeT: 0 },
-    map: {},   // nodes by id
-    rooms: {}, // room data by id
+    map: {},
+    rooms: {},
     enemies: [],
     bullets: [],
     pickups: [],
@@ -109,15 +107,14 @@
     decals: []
   };
 
-  // Weapons (unlockable / buyable)
+  // Weapons
   var WEAPONS = [
     { id: 0, name: "Pistol",  unlocked: true,  dmg: 2, fire: 0.18, speed: 440, spread: 0.00, pellets: 1 },
     { id: 1, name: "Shotgun", unlocked: false, dmg: 1, fire: 0.55, speed: 400, spread: 0.35, pellets: 5 },
     { id: 2, name: "Rifle",   unlocked: false, dmg: 3, fire: 0.12, speed: 520, spread: 0.02, pellets: 1 }
   ];
 
-  // Shop items (simple)
-  // type: "unlock" sets weapon unlocked; "heal" heals; "maxhp" increases max hp
+  // Shop items
   var SHOP_ITEMS = [
     { key: 1, label: "Unlock Shotgun", cost: 8,  type: "unlock", weaponId: 1, desc: "Wide spread, big control" },
     { key: 2, label: "Unlock Rifle",   cost: 14, type: "unlock", weaponId: 2, desc: "Fast, accurate, punchy" },
@@ -148,16 +145,14 @@
         id: id,
         x: p.x, y: p.y,
         depth: Math.abs(p.x) + Math.abs(p.y),
-        kind: "combat",
+        kind: "combat",   // combat | shop | heal | armory | start
         seen: false,
         cleared: false,
-        locked: false
+        flags: {}         // per-room flags (e.g., fountainUsed)
       };
     }
     return state.map[id];
   }
-  function getRoomNode(id) { return state.map[id] || null; }
-
   function ensureRoom(id) {
     if (!state.rooms[id]) {
       state.rooms[id] = {
@@ -170,15 +165,12 @@
     }
     return state.rooms[id];
   }
-  function getRoom(id) { return state.rooms[id] || null; }
 
-  // ---------- Deterministic shop placement per depth ----------
-  // For each depth d >= 1, pick exactly one coordinate on that ring:
-  // cycle through cardinal points so it's reachable and obvious.
+  // ---------- Deterministic special rooms ----------
+  // Shop: one per depth ring
   function isShopCoord(x, y) {
     var d = Math.abs(x) + Math.abs(y);
     if (d < 1) return false;
-    // choose one of 4 positions: (d,0), (0,d), (-d,0), (0,-d)
     var m = d % 4;
     if (m === 0) return (x === d && y === 0);
     if (m === 1) return (x === 0 && y === d);
@@ -186,8 +178,32 @@
     return (x === 0 && y === -d);
   }
 
+  // Heal: one per depth ring, offset from shop ring pick
+  function isHealCoord(x, y) {
+    var d = Math.abs(x) + Math.abs(y);
+    if (d < 2) return false;
+    // choose the "diagonal-ish" extreme to differentiate
+    // (d-1, 1), (1, d-1), (-d+1, -1), (-1, -d+1) with sign consistency
+    if (x >= 0 && y >= 0) return (x === d - 1 && y === 1);
+    if (x <= 0 && y >= 0) return (x === -1 && y === d - 1);
+    if (x <= 0 && y <= 0) return (x === -(d - 1) && y === -1);
+    return (x === 1 && y === -(d - 1));
+  }
+
+  // Armory: rare rooms (deterministic “hash”)
+  function isArmoryCoord(x, y) {
+    var d = Math.abs(x) + Math.abs(y);
+    if (d < 3) return false;
+    // deterministic pseudo-hash: rare when (x*31 + y*17 + d*13) % 11 == 0, but avoid colliding with shop/heal
+    var h = (x * 31 + y * 17 + d * 13);
+    h = ((h % 11) + 11) % 11;
+    if (h !== 0) return false;
+    if (isShopCoord(x, y) || isHealCoord(x, y)) return false;
+    return true;
+  }
+
   // ---------- Tile generation ----------
-  // 0 wall, 1 floor, 2 pit, 3 door marker, 4 small pillar
+  // 0 wall, 1 floor, 2 pit, 3 door marker, 4 small pillar, 5 decor
   function genRoomTiles(node) {
     var room = ensureRoom(node.id);
     var g = new Array(ROOM_TW * ROOM_TH);
@@ -200,19 +216,36 @@
       }
     }
 
-    // rooms look different
-    if (node.kind === "shop") {
-      // cleaner floor
-    } else if (node.kind === "combat") {
+    // Different feels per room
+    if (node.kind === "combat") {
       for (var i = 0; i < 26; i++) {
         var px = 2 + randi(ROOM_TW - 4);
         var py = 2 + randi(ROOM_TH - 4);
         if (chance(0.25)) g[tileIndex(px, py)] = 2;
       }
+    } else if (node.kind === "shop") {
+      // cleaner floors + decor
+      for (var d = 0; d < 18; d++) {
+        var sx = 2 + randi(ROOM_TW - 4);
+        var sy = 2 + randi(ROOM_TH - 4);
+        if (chance(0.35)) g[tileIndex(sx, sy)] = 5;
+      }
+    } else if (node.kind === "heal") {
+      for (var d2 = 0; d2 < 14; d2++) {
+        var hx = 2 + randi(ROOM_TW - 4);
+        var hy = 2 + randi(ROOM_TH - 4);
+        if (chance(0.28)) g[tileIndex(hx, hy)] = 5;
+      }
+    } else if (node.kind === "armory") {
+      for (var d3 = 0; d3 < 16; d3++) {
+        var ax = 2 + randi(ROOM_TW - 4);
+        var ay = 2 + randi(ROOM_TH - 4);
+        if (chance(0.30)) g[tileIndex(ax, ay)] = 5;
+      }
     }
 
     // pillars
-    var density = (node.kind === "combat") ? 0.055 : 0.03;
+    var density = (node.kind === "combat") ? 0.055 : 0.020;
     for (y = 2; y < ROOM_TH - 2; y++) {
       for (x = 2; x < ROOM_TW - 2; x++) {
         if (g[tileIndex(x, y)] !== 1) continue;
@@ -246,7 +279,7 @@
     return room;
   }
 
-  // ---------- World collision (pillars are SMALL) ----------
+  // ---------- World collision ----------
   function isSolidAtPoint(wx, wy, room) {
     var tx = (wx / TILE) | 0;
     var ty = (wy / TILE) | 0;
@@ -277,7 +310,7 @@
     return false;
   }
 
-  // ---------- Neighbor generation (guaranteed connectivity within bounds) ----------
+  // ---------- Neighbor generation ----------
   var MAX_DEPTH = 10;
 
   function buildNeighborsAround(id) {
@@ -303,35 +336,50 @@
     genRoomTiles(node);
   }
 
+  // ---------- Room kind assignment ----------
+  function assignRoomKind(node) {
+    if (node.id === "0,0") return "start";
+    if (isShopCoord(node.x, node.y)) return "shop";
+    if (isHealCoord(node.x, node.y)) return "heal";
+    if (isArmoryCoord(node.x, node.y)) return "armory";
+    return "combat";
+  }
+
   // ---------- Content spawning ----------
+  function lockDoors(room, locked) {
+    room.doorsOpen.N = !locked;
+    room.doorsOpen.S = !locked;
+    room.doorsOpen.W = !locked;
+    room.doorsOpen.E = !locked;
+  }
+
   function spawnRoomContents(roomId) {
     var node = ensureNode(roomId);
     var room = ensureRoom(roomId);
 
-    // Determine kind
-    if (roomId === "0,0") node.kind = "start";
-    else if (isShopCoord(node.x, node.y)) node.kind = "shop";
-    else node.kind = "combat";
+    node.kind = assignRoomKind(node);
 
-    // Clear live arrays
+    // clear live arrays
     state.enemies.length = 0;
     state.bullets.length = 0;
     state.pickups.length = 0;
     state.fx.length = 0;
     state.decals.length = 0;
 
-    // Door behavior by kind
-    if (node.kind === "shop" || node.kind === "start") {
+    // peaceful rooms
+    if (node.kind === "start" || node.kind === "shop" || node.kind === "heal" || node.kind === "armory") {
       node.cleared = true;
       lockDoors(room, false);
-      // little freebies in start
+
+      // start freebies
       if (node.kind === "start") {
         state.pickups.push({ x: ROOM_W / 2 + 44, y: ROOM_H / 2, t: "coin", v: 3, r: 7 });
       }
+
       return;
     }
 
-    // Combat room
+    // combat rooms
     if (!node.cleared) {
       var n = 4 + randi(4) + (node.depth > 4 ? 1 : 0);
       for (var i = 0; i < n; i++) {
@@ -345,20 +393,13 @@
     }
   }
 
-  function lockDoors(room, locked) {
-    room.doorsOpen.N = !locked;
-    room.doorsOpen.S = !locked;
-    room.doorsOpen.W = !locked;
-    room.doorsOpen.E = !locked;
-  }
-
   // ---------- Enemy spawn ----------
   function spawnEnemy(type, x, y, depth) {
     var hpBase = (type === "shooter") ? 6 : 5;
     var e = {
       type: type,
       x: x, y: y,
-      r: 10,
+      r: (type === "shooter") ? 10 : 11,
       hp: hpBase + ((depth / 3) | 0),
       vx: 0, vy: 0,
       t: 0,
@@ -368,8 +409,11 @@
   }
 
   // ---------- Room caching ----------
+  function shallowClone(o) { var k, n = {}; for (k in o) if (o.hasOwnProperty(k)) n[k] = o[k]; return n; }
+  function cloneArray(arr) { var out = []; for (var i = 0; i < arr.length; i++) out.push(shallowClone(arr[i])); return out; }
+
   function stashRoom(roomId) {
-    var r = getRoom(roomId);
+    var r = state.rooms[roomId];
     if (!r) return;
     r.__cache = {
       enemies: cloneArray(state.enemies),
@@ -382,15 +426,12 @@
     var r = ensureRoom(roomId);
     var node = ensureNode(roomId);
 
-    // Ensure kind is set early (for tile look)
-    if (roomId === "0,0") node.kind = "start";
-    else if (isShopCoord(node.x, node.y)) node.kind = "shop";
-    else node.kind = node.kind || "combat";
+    node.kind = assignRoomKind(node);
 
     buildNeighborsAround(roomId);
     genRoomTiles(node);
 
-    // Clear live arrays
+    // clear live arrays
     state.enemies.length = 0;
     state.bullets.length = 0;
     state.pickups.length = 0;
@@ -410,36 +451,17 @@
     else lockDoors(r, false);
 
     node.seen = true;
-
-    // Close shop UI on room change
     state.shopOpen = false;
   }
 
-  function cloneArray(arr) {
-    var out = [];
-    for (var i = 0; i < arr.length; i++) out.push(shallowClone(arr[i]));
-    return out;
-  }
-  function shallowClone(o) {
-    var k, n = {};
-    for (k in o) if (o.hasOwnProperty(k)) n[k] = o[k];
-    return n;
-  }
-
-  // ---------- Door transition (BUGFIX: trigger when pushing into doorway) ----------
+  // ---------- Door transition (push-to-transition bugfix stays) ----------
   function inDoorBand(dir, x, y) {
     var cx = ROOM_W * 0.5;
     var cy = ROOM_H * 0.5;
 
-    if (dir === "N") {
-      return (Math.abs(x - cx) <= DOOR_SPAN) && (y <= DOOR_THICK);
-    }
-    if (dir === "S") {
-      return (Math.abs(x - cx) <= DOOR_SPAN) && (y >= ROOM_H - DOOR_THICK);
-    }
-    if (dir === "W") {
-      return (Math.abs(y - cy) <= DOOR_SPAN) && (x <= DOOR_THICK);
-    }
+    if (dir === "N") return (Math.abs(x - cx) <= DOOR_SPAN) && (y <= DOOR_THICK);
+    if (dir === "S") return (Math.abs(x - cx) <= DOOR_SPAN) && (y >= ROOM_H - DOOR_THICK);
+    if (dir === "W") return (Math.abs(y - cy) <= DOOR_SPAN) && (x <= DOOR_THICK);
     return (Math.abs(y - cy) <= DOOR_SPAN) && (x >= ROOM_W - DOOR_THICK);
   }
 
@@ -449,7 +471,6 @@
 
     if (!room.neighbors[dir]) return false;
     if (!room.doorsOpen[dir]) {
-      // bump message only if you're actually at the blocked door
       if (inDoorBand(dir, player.x, player.y)) {
         state.msg = "DOOR LOCKED";
         state.msgT = 0.6;
@@ -457,7 +478,6 @@
       return false;
     }
 
-    // compute next room id
     var dx = 0, dy = 0;
     if (dir === "N") dy = -1;
     else if (dir === "S") dy = 1;
@@ -465,23 +485,20 @@
     else dx = 1;
 
     var nid = roomKey(node.x + dx, node.y + dy);
-    var nextNode = ensureNode(nid);
+    ensureNode(nid);
     ensureRoom(nid);
 
-    // stash current, load next
     stashRoom(state.roomId);
     state.roomId = nid;
     loadRoom(state.roomId);
 
-    // place player just inside opposite side
     if (dir === "N") { player.y = ROOM_H - 18; player.x = clamp(player.x, 18, ROOM_W - 18); }
     if (dir === "S") { player.y = 18; player.x = clamp(player.x, 18, ROOM_W - 18); }
     if (dir === "W") { player.x = ROOM_W - 18; player.y = clamp(player.y, 18, ROOM_H - 18); }
     if (dir === "E") { player.x = 18; player.y = clamp(player.y, 18, ROOM_H - 18); }
 
-    // snap camera
-    state.cam.x = clamp(player.x - VIEW_W / 2, 0, ROOM_W - VIEW_W);
-    state.cam.y = clamp(player.y - VIEW_H / 2, 0, ROOM_H - VIEW_H);
+    state.cam.x = clamp(player.x - VIEW_W / 2, 0, Math.max(0, ROOM_W - VIEW_W));
+    state.cam.y = clamp(player.y - VIEW_H / 2, 0, Math.max(0, ROOM_H - VIEW_H));
     state.cam.shake = 0;
     state.cam.shakeT = 0;
     return true;
@@ -500,6 +517,11 @@
     });
   }
 
+  function shake(amount, time) {
+    state.cam.shake = Math.max(state.cam.shake, amount);
+    state.cam.shakeT = Math.max(state.cam.shakeT, time);
+  }
+
   function shoot() {
     if (player.fireCD > 0) return;
 
@@ -508,9 +530,7 @@
 
     var wx = state.cam.x + mouse.x;
     var wy = state.cam.y + mouse.y;
-    var dx = wx - player.x;
-    var dy = wy - player.y;
-    var n = norm(dx, dy);
+    var n = norm(wx - player.x, wy - player.y);
     var baseA = Math.atan2(n.y, n.x);
 
     for (var i = 0; i < w.pellets; i++) {
@@ -520,12 +540,7 @@
     }
 
     player.fireCD = w.fire;
-
-    // FX
     shake(2 + (w.pellets > 1 ? 2 : 0), 0.08);
-    for (var k = 0; k < 10; k++) {
-      state.fx.push({ x: player.x, y: player.y, vx: (randf() - 0.5) * 160, vy: (randf() - 0.5) * 160, t: 0.25, c: 0 });
-    }
   }
 
   function spawnEnemyBullet(x, y, vx, vy, dmg) {
@@ -533,19 +548,11 @@
   }
 
   // ---------- Damage / FX ----------
-  function shake(amount, time) {
-    state.cam.shake = Math.max(state.cam.shake, amount);
-    state.cam.shakeT = Math.max(state.cam.shakeT, time);
-  }
-
   function hurtPlayer(dmg) {
     if (player.invT > 0) return;
     player.hp -= dmg;
     player.invT = 0.6;
     shake(6, 0.16);
-    for (var i = 0; i < 18; i++) {
-      state.fx.push({ x: player.x, y: player.y, vx: (randf() - 0.5) * 240, vy: (randf() - 0.5) * 240, t: 0.5, c: 1 });
-    }
     if (player.hp <= 0) {
       player.hp = 0;
       state.msg = "YOU DIED — PRESS R";
@@ -555,7 +562,6 @@
   }
 
   // ---------- Pickups ----------
-  // types: coin, heart
   function dropCoins(x, y, amount) {
     for (var i = 0; i < amount; i++) {
       var a = randf() * TAU;
@@ -572,7 +578,6 @@
 
   // ---------- Shop ----------
   function nearShopCounter() {
-    // counter at top-center-ish
     var cx = ROOM_W * 0.5;
     var cy = TILE * 2.5;
     return dist2(player.x, player.y, cx, cy) < (38 * 38);
@@ -599,25 +604,16 @@
 
     if (item.type === "unlock") {
       var w = WEAPONS[item.weaponId];
-      if (w.unlocked) {
-        state.msg = "ALREADY OWNED";
-        state.msgT = 0.7;
-        return;
-      }
+      if (w.unlocked) { state.msg = "ALREADY OWNED"; state.msgT = 0.7; return; }
       w.unlocked = true;
       state.coins -= item.cost;
       state.msg = "UNLOCKED: " + w.name;
       state.msgT = 1.0;
-      shake(2, 0.08);
       return;
     }
 
     if (item.type === "heal") {
-      if (player.hp >= player.hpMax) {
-        state.msg = "HP FULL";
-        state.msgT = 0.7;
-        return;
-      }
+      if (player.hp >= player.hpMax) { state.msg = "HP FULL"; state.msgT = 0.7; return; }
       state.coins -= item.cost;
       player.hp = clamp(player.hp + item.amount, 0, player.hpMax);
       state.msg = "HEALED";
@@ -635,25 +631,71 @@
     }
   }
 
+  // ---------- Heal Fountain / Armory interactions ----------
+  function nearFountain() {
+    var cx = ROOM_W * 0.5;
+    var cy = ROOM_H * 0.5;
+    return dist2(player.x, player.y, cx, cy) < (44 * 44);
+  }
+
+  function useFountain() {
+    var node = ensureNode(state.roomId);
+    if (node.kind !== "heal") return;
+    if (!nearFountain()) { state.msg = "STAND BY THE FOUNTAIN"; state.msgT = 0.8; return; }
+    if (node.flags.fountainUsed) { state.msg = "FOUNTAIN DRIED"; state.msgT = 0.9; return; }
+
+    node.flags.fountainUsed = true;
+    player.hp = player.hpMax;
+    state.msg = "FULL HEAL";
+    state.msgT = 1.0;
+    shake(2, 0.10);
+  }
+
+  function nearArmoryChest() {
+    var cx = ROOM_W * 0.5;
+    var cy = TILE * 3.5;
+    return dist2(player.x, player.y, cx, cy) < (44 * 44);
+  }
+
+  function openArmory() {
+    var node = ensureNode(state.roomId);
+    if (node.kind !== "armory") return;
+    if (!nearArmoryChest()) { state.msg = "GET CLOSER"; state.msgT = 0.8; return; }
+    if (node.flags.armoryUsed) { state.msg = "EMPTY"; state.msgT = 0.8; return; }
+
+    node.flags.armoryUsed = true;
+
+    // Give a free weapon unlock if any locked remain
+    var candidates = [];
+    for (var i = 0; i < WEAPONS.length; i++) if (!WEAPONS[i].unlocked) candidates.push(WEAPONS[i]);
+    if (candidates.length === 0) {
+      // fallback: coins
+      state.coins += 10;
+      state.msg = "FOUND COINS";
+      state.msgT = 1.0;
+      return;
+    }
+
+    var w = candidates[randi(candidates.length)];
+    w.unlocked = true;
+    state.msg = "FOUND: " + w.name;
+    state.msgT = 1.2;
+  }
+
   // ---------- Update loop ----------
   function update(dt) {
-    // pause / restart
     if (state.paused) {
       if (wasPressed(KEY.ESC)) state.paused = false;
-      if (wasPressed(KEY.F)) requestFullscreen();
       if (wasPressed(KEY.R)) resetGame();
       return;
     }
 
     if (wasPressed(KEY.ESC)) {
-      // if shop open, close it first
       if (state.shopOpen) state.shopOpen = false;
       else state.paused = true;
     }
-    if (wasPressed(KEY.F)) requestFullscreen();
     if (wasPressed(KEY.R)) resetGame();
 
-    // timers
     if (state.msgT > 0) state.msgT -= dt;
     if (player.invT > 0) player.invT -= dt;
     if (player.fireCD > 0) player.fireCD -= dt;
@@ -662,33 +704,30 @@
     if (state.cam.shakeT > 0) { state.cam.shakeT -= dt; state.cam.shake = lerp(state.cam.shake, 0, 10 * dt); }
     else state.cam.shake = 0;
 
-    // shop interactions
     var node = ensureNode(state.roomId);
-    if (node.kind === "shop") {
-      if (wasPressed(KEY.Q)) { if (WEAPONS[0].unlocked) player.weapon = 0; }
-      if (wasPressed(KEY.E)) { if (WEAPONS[1].unlocked) player.weapon = 1; else if (WEAPONS[2].unlocked) player.weapon = 2; } // quick swap-ish
 
-      if (wasPressed(KEY.F)) tryOpenShop();
-
-      if (state.shopOpen) {
-        // buy using 1-4
-        if (wasPressed(KEY.ONE)) buyShopItem(SHOP_ITEMS[0]);
-        if (wasPressed(KEY.TWO)) buyShopItem(SHOP_ITEMS[1]);
-        if (wasPressed(KEY.THREE)) buyShopItem(SHOP_ITEMS[2]);
-        if (wasPressed(KEY.FOUR)) buyShopItem(SHOP_ITEMS[3]);
-      }
-    } else {
-      // weapon swaps in normal rooms
-      if (wasPressed(KEY.Q) && WEAPONS[0].unlocked) player.weapon = 0;
-      if (wasPressed(KEY.E)) {
-        if (WEAPONS[1].unlocked) player.weapon = 1;
-        else if (WEAPONS[2].unlocked) player.weapon = 2;
-      }
+    // room interactions (F)
+    if (wasPressed(KEY.F)) {
+      if (node.kind === "shop") tryOpenShop();
+      else if (node.kind === "heal") useFountain();
+      else if (node.kind === "armory") openArmory();
     }
 
-    // if shop open, freeze combat sim (still allow movement a bit? keep it simple: freeze)
-    if (state.shopOpen) {
-      // still allow small idle particles fade
+    // weapon swaps
+    if (wasPressed(KEY.Q) && WEAPONS[0].unlocked) player.weapon = 0;
+    if (wasPressed(KEY.E)) {
+      // prefer shotgun then rifle
+      if (WEAPONS[1].unlocked) player.weapon = 1;
+      else if (WEAPONS[2].unlocked) player.weapon = 2;
+    }
+
+    // shop overlay purchase
+    if (node.kind === "shop" && state.shopOpen) {
+      if (wasPressed(KEY.ONE)) buyShopItem(SHOP_ITEMS[0]);
+      if (wasPressed(KEY.TWO)) buyShopItem(SHOP_ITEMS[1]);
+      if (wasPressed(KEY.THREE)) buyShopItem(SHOP_ITEMS[2]);
+      if (wasPressed(KEY.FOUR)) buyShopItem(SHOP_ITEMS[3]);
+      // freeze combat sim
       updateParticles(dt);
       return;
     }
@@ -744,44 +783,27 @@
     // shoot
     if (mouse.down) shoot();
 
-    // move with door-aware collision (bugfix)
+    // move + door transitions
     var room = ensureRoom(state.roomId);
 
     var nxp = player.x + player.vx * dt;
     var nyp = player.y + player.vy * dt;
 
-    // If pushing into a doorway band and moving outward, transition.
-    // North
-    if (player.vy < 0 && inDoorBand("N", player.x, player.y) && (nyp <= 2)) {
-      if (tryDoorTransitionByIntent("N")) return;
-    }
-    // South
-    if (player.vy > 0 && inDoorBand("S", player.x, player.y) && (nyp >= ROOM_H - 2)) {
-      if (tryDoorTransitionByIntent("S")) return;
-    }
-    // West
-    if (player.vx < 0 && inDoorBand("W", player.x, player.y) && (nxp <= 2)) {
-      if (tryDoorTransitionByIntent("W")) return;
-    }
-    // East
-    if (player.vx > 0 && inDoorBand("E", player.x, player.y) && (nxp >= ROOM_W - 2)) {
-      if (tryDoorTransitionByIntent("E")) return;
-    }
+    if (player.vy < 0 && inDoorBand("N", player.x, player.y) && (nyp <= 2)) { if (tryDoorTransitionByIntent("N")) return; }
+    if (player.vy > 0 && inDoorBand("S", player.x, player.y) && (nyp >= ROOM_H - 2)) { if (tryDoorTransitionByIntent("S")) return; }
+    if (player.vx < 0 && inDoorBand("W", player.x, player.y) && (nxp <= 2)) { if (tryDoorTransitionByIntent("W")) return; }
+    if (player.vx > 0 && inDoorBand("E", player.x, player.y) && (nxp >= ROOM_W - 2)) { if (tryDoorTransitionByIntent("E")) return; }
 
-    // normal collision resolution
-    if (!collideCircle(nxp, player.y, player.r, room)) player.x = nxp;
-    else player.vx = 0;
+    if (!collideCircle(nxp, player.y, player.r, room)) player.x = nxp; else player.vx = 0;
+    if (!collideCircle(player.x, nyp, player.r, room)) player.y = nyp; else player.vy = 0;
 
-    if (!collideCircle(player.x, nyp, player.r, room)) player.y = nyp;
-    else player.vy = 0;
-
-    // camera follow
-    var targetX = clamp(player.x - VIEW_W / 2, 0, ROOM_W - VIEW_W);
-    var targetY = clamp(player.y - VIEW_H / 2, 0, ROOM_H - VIEW_H);
+    // camera
+    var targetX = clamp(player.x - VIEW_W / 2, 0, Math.max(0, ROOM_W - VIEW_W));
+    var targetY = clamp(player.y - VIEW_H / 2, 0, Math.max(0, ROOM_H - VIEW_H));
     state.cam.x = lerp(state.cam.x, targetX, 10 * dt);
     state.cam.y = lerp(state.cam.y, targetY, 10 * dt);
 
-    // enemies/bullets/pickups/fx
+    // sim
     updateEnemies(dt);
     updateBullets(dt);
     updatePickups(dt);
@@ -794,7 +816,6 @@
         lockDoors(room, false);
         state.msg = "ROOM CLEARED";
         state.msgT = 0.9;
-        // occasional reward
         if (chance(0.30)) state.pickups.push({ x: ROOM_W / 2, y: ROOM_H / 2, t: "coin", v: 3, r: 7 });
         if (chance(0.18)) state.pickups.push({ x: ROOM_W / 2 + 18, y: ROOM_H / 2, t: "heart", v: 1, r: 7 });
       }
@@ -803,7 +824,8 @@
 
   function updateEnemies(dt) {
     var room = ensureRoom(state.roomId);
-    var depth = ensureNode(state.roomId).depth;
+    var node = ensureNode(state.roomId);
+    var depth = node.depth;
 
     for (var i = state.enemies.length - 1; i >= 0; i--) {
       var e = state.enemies[i];
@@ -818,16 +840,10 @@
         e.vx = (dx / d) * sp;
         e.vy = (dy / d) * sp;
       } else {
-        // shooter
         var sp2 = 70 + depth * 1.5;
         var desired = 150;
-        if (d < desired) {
-          e.vx = -(dx / d) * sp2;
-          e.vy = -(dy / d) * sp2;
-        } else {
-          e.vx = (randf() - 0.5) * 30;
-          e.vy = (randf() - 0.5) * 30;
-        }
+        if (d < desired) { e.vx = -(dx / d) * sp2; e.vy = -(dy / d) * sp2; }
+        else { e.vx = (randf() - 0.5) * 30; e.vy = (randf() - 0.5) * 30; }
 
         if (e.fireCD > 0) e.fireCD -= dt;
         if (e.fireCD <= 0 && d < 340) {
@@ -837,29 +853,18 @@
         }
       }
 
-      // move with collision
       var nx = e.x + e.vx * dt;
       var ny = e.y + e.vy * dt;
       if (!collideCircle(nx, e.y, e.r, room)) e.x = nx;
       if (!collideCircle(e.x, ny, e.r, room)) e.y = ny;
 
-      // contact damage
       if (dist2(e.x, e.y, player.x, player.y) < (e.r + player.r) * (e.r + player.r)) hurtPlayer(1);
 
-      // death
       if (e.hp <= 0) {
-        state.decals.push({ x: e.x, y: e.y, r: e.r + 10, t: 999, kind: "spl" });
-        for (var j = 0; j < 22; j++) {
-          state.fx.push({ x: e.x, y: e.y, vx: (randf() - 0.5) * 300, vy: (randf() - 0.5) * 300, t: 0.55, c: 2 });
-        }
-
-        // coins drop (scales a bit with depth)
+        // coin drop
         var coins = 1 + randi(2) + ((depth / 4) | 0);
         dropCoins(e.x, e.y, coins);
-
-        // small heart chance
         if (chance(0.14)) state.pickups.push({ x: e.x, y: e.y, t: "heart", v: 1, r: 7 });
-
         state.enemies.splice(i, 1);
       }
     }
@@ -875,13 +880,7 @@
       var nx = b.x + b.vx * dt;
       var ny = b.y + b.vy * dt;
 
-      if (isSolidAtPoint(nx, ny, room)) {
-        for (var k = 0; k < 6; k++) {
-          state.fx.push({ x: nx, y: ny, vx: (randf() - 0.5) * 170, vy: (randf() - 0.5) * 170, t: 0.22, c: 0 });
-        }
-        state.bullets.splice(i, 1);
-        continue;
-      }
+      if (isSolidAtPoint(nx, ny, room)) { state.bullets.splice(i, 1); continue; }
 
       b.x = nx; b.y = ny;
 
@@ -911,18 +910,8 @@
     for (var i = state.pickups.length - 1; i >= 0; i--) {
       var p = state.pickups[i];
       if (dist2(p.x, p.y, player.x, player.y) < (p.r + player.r + 6) * (p.r + player.r + 6)) {
-        if (p.t === "coin") {
-          state.coins += p.v;
-          state.msg = "+COIN";
-          state.msgT = 0.35;
-        } else if (p.t === "heart") {
-          player.hp = clamp(player.hp + p.v, 0, player.hpMax);
-          state.msg = "+HP";
-          state.msgT = 0.45;
-        }
-        for (var k = 0; k < 10; k++) {
-          state.fx.push({ x: p.x, y: p.y, vx: (randf() - 0.5) * 200, vy: (randf() - 0.5) * 200, t: 0.25, c: 3 });
-        }
+        if (p.t === "coin") { state.coins += p.v; state.msg = "+COIN"; state.msgT = 0.35; }
+        else if (p.t === "heart") { player.hp = clamp(player.hp + p.v, 0, player.hpMax); state.msg = "+HP"; state.msgT = 0.45; }
         state.pickups.splice(i, 1);
       }
     }
@@ -940,17 +929,15 @@
     }
   }
 
-  // ---------- Render ----------
+  // ---------- Render (cleaner pixel look) ----------
   function draw() {
     var room = ensureRoom(state.roomId);
     var node = ensureNode(state.roomId);
 
-    // background
     ctx.clearRect(0, 0, VIEW_W, VIEW_H);
     ctx.fillStyle = "#07060b";
     ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
-    // camera shake
     var sx = 0, sy = 0;
     if (state.cam.shake > 0 && state.cam.shakeT > 0) {
       sx = (randf() - 0.5) * state.cam.shake * 2;
@@ -959,196 +946,95 @@
     var camX = state.cam.x + sx;
     var camY = state.cam.y + sy;
 
-    // room
     drawRoom(room, node, camX, camY);
-
-    // decals
-    for (var i = 0; i < state.decals.length; i++) {
-      var d = state.decals[i];
-      var dx = d.x - camX, dy = d.y - camY;
-      ctx.fillStyle = "rgba(255,70,120,0.10)";
-      ctx.beginPath();
-      ctx.arc(dx, dy, d.r, 0, TAU);
-      ctx.fill();
-    }
-
-    // pickups
-    for (i = 0; i < state.pickups.length; i++) {
-      var pk = state.pickups[i];
-      var px = pk.x - camX, py = pk.y - camY;
-
-      // shadow
-      ctx.fillStyle = "rgba(0,0,0,0.35)";
-      ctx.beginPath();
-      ctx.ellipse(px, py + 6, pk.r * 1.0, pk.r * 0.6, 0, 0, TAU);
-      ctx.fill();
-
-      if (pk.t === "coin") {
-        ctx.fillStyle = "rgba(255,215,90,0.95)";
-        ctx.beginPath();
-        ctx.arc(px, py, pk.r, 0, TAU);
-        ctx.fill();
-        ctx.fillStyle = "rgba(255,255,255,0.35)";
-        ctx.fillRect(px - 2, py - 4, 4, 2);
-      } else {
-        ctx.fillStyle = "rgba(120,255,180,0.95)";
-        ctx.beginPath();
-        ctx.arc(px, py, pk.r, 0, TAU);
-        ctx.fill();
-      }
-    }
-
-    // enemies
-    for (i = 0; i < state.enemies.length; i++) {
-      var e = state.enemies[i];
-      var ex = e.x - camX, ey = e.y - camY;
-
-      // shadow
-      ctx.fillStyle = "rgba(0,0,0,0.35)";
-      ctx.beginPath();
-      ctx.ellipse(ex, ey + e.r * 0.85, e.r * 0.95, e.r * 0.55, 0, 0, TAU);
-      ctx.fill();
-
-      // body
-      ctx.fillStyle = (e.type === "shooter") ? "rgba(140,190,255,0.92)" : "rgba(255,90,170,0.92)";
-      ctx.beginPath();
-      ctx.arc(ex, ey, e.r, 0, TAU);
-      ctx.fill();
-
-      // face dot
-      ctx.fillStyle = "rgba(0,0,0,0.25)";
-      ctx.beginPath();
-      ctx.arc(ex + (e.type === "shooter" ? 3 : -3), ey - 2, 2, 0, TAU);
-      ctx.fill();
-
-      // HP bar
-      var w = e.r * 2.2;
-      ctx.fillStyle = "rgba(0,0,0,0.5)";
-      ctx.fillRect(ex - w / 2, ey - e.r - 12, w, 4);
-      ctx.fillStyle = "rgba(255,255,255,0.82)";
-      ctx.fillRect(ex - w / 2, ey - e.r - 12, w * clamp(e.hp / (6 + ((node.depth / 3) | 0)), 0, 1), 4);
-    }
-
-    // bullets
-    for (i = 0; i < state.bullets.length; i++) {
-      var b = state.bullets[i];
-      var bx = b.x - camX, by = b.y - camY;
-      ctx.fillStyle = (b.from === "player") ? "rgba(255,255,255,0.9)" : "rgba(255,200,90,0.9)";
-      ctx.beginPath();
-      ctx.arc(bx, by, b.r, 0, TAU);
-      ctx.fill();
-    }
-
-    // particles
-    for (i = 0; i < state.fx.length; i++) {
-      var fx = state.fx[i];
-      var fxX = fx.x - camX, fxY = fx.y - camY;
-      var a = clamp(fx.t / 0.55, 0, 1);
-      if (fx.c === 1) ctx.fillStyle = "rgba(255,90,140," + (0.28 * a) + ")";
-      else if (fx.c === 2) ctx.fillStyle = "rgba(255,210,120," + (0.22 * a) + ")";
-      else if (fx.c === 3) ctx.fillStyle = "rgba(124,92,255," + (0.18 * a) + ")";
-      else ctx.fillStyle = "rgba(255,255,255," + (0.22 * a) + ")";
-      ctx.fillRect(fxX, fxY, 2, 2);
-    }
-
-    // player
-    var px2 = player.x - camX, py2 = player.y - camY;
-    ctx.fillStyle = "rgba(0,0,0,0.35)";
-    ctx.beginPath();
-    ctx.ellipse(px2, py2 + player.r * 0.95, player.r * 0.95, player.r * 0.55, 0, 0, TAU);
-    ctx.fill();
-
-    ctx.fillStyle = (player.invT > 0) ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.92)";
-    ctx.beginPath();
-    ctx.arc(px2, py2, player.r, 0, TAU);
-    ctx.fill();
-
-    // aim reticle
-    ctx.strokeStyle = "rgba(124,92,255,0.55)";
-    ctx.beginPath();
-    ctx.arc(mouse.x, mouse.y, 10, 0, TAU);
-    ctx.stroke();
-
-    // vignette lighting
-    drawVignette();
-
-    // HUD + minimap + shop overlay
+    drawEntities(camX, camY);
     drawHUD(node);
     drawMinimap();
 
     if (node.kind === "shop") drawShopHint();
-    if (state.shopOpen) drawShopOverlay();
+    if (node.kind === "heal") drawHealHint(node);
+    if (node.kind === "armory") drawArmoryHint(node);
 
+    if (state.shopOpen) drawShopOverlay();
     if (state.paused) drawPause();
+
+    if (WATERMARK_ENABLED && WATERMARK_TEXT && WATERMARK_TEXT !== "YOUR-SITE-OR-GAME-NAME") drawWatermark();
   }
 
   function drawRoom(room, node, camX, camY) {
     var g = room.g;
     if (!g) return;
 
-    // palette
-    var floor = (node.kind === "shop") ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.02)";
-    var wall = "rgba(255,255,255,0.06)";
-    var pit = "rgba(0,0,0,0.58)";
+    // palette by room
+    var floorA = "rgba(255,255,255,0.020)";
+    var floorB = "rgba(255,255,255,0.028)";
+    var wallA  = "rgba(255,255,255,0.060)";
+    var wallB  = "rgba(255,255,255,0.085)";
+    var pit    = "rgba(0,0,0,0.62)";
+    var deco   = "rgba(124,92,255,0.10)";
+
+    if (node.kind === "shop") { floorA = "rgba(255,255,255,0.030)"; floorB = "rgba(255,255,255,0.040)"; }
+    if (node.kind === "heal") { floorA = "rgba(120,255,170,0.020)"; floorB = "rgba(255,255,255,0.034)"; }
+    if (node.kind === "armory") { floorA = "rgba(255,215,90,0.016)"; floorB = "rgba(255,255,255,0.034)"; }
 
     var x, y;
     for (y = 0; y < ROOM_TH; y++) {
       for (x = 0; x < ROOM_TW; x++) {
         var t = g[tileIndex(x, y)];
-        var sx = x * TILE - camX;
-        var sy = y * TILE - camY;
+        var sx = (x * TILE - camX) | 0;
+        var sy = (y * TILE - camY) | 0;
 
         if (sx > VIEW_W || sy > VIEW_H || sx + TILE < 0 || sy + TILE < 0) continue;
 
         if (t === 0) {
-          ctx.fillStyle = wall;
+          ctx.fillStyle = ((x + y) & 1) ? wallA : wallB;
           ctx.fillRect(sx, sy, TILE, TILE);
-          // subtle bevel
-          ctx.fillStyle = "rgba(0,0,0,0.10)";
+          // bevel highlight
+          ctx.fillStyle = "rgba(0,0,0,0.22)";
           ctx.fillRect(sx, sy + TILE - 3, TILE, 3);
+          ctx.fillStyle = "rgba(255,255,255,0.05)";
+          ctx.fillRect(sx, sy, TILE, 2);
         } else if (t === 2) {
           ctx.fillStyle = pit;
           ctx.fillRect(sx, sy, TILE, TILE);
+          ctx.fillStyle = "rgba(255,255,255,0.02)";
+          ctx.fillRect(sx + 2, sy + 2, TILE - 4, TILE - 4);
         } else {
-          ctx.fillStyle = floor;
+          ctx.fillStyle = ((x + y) & 1) ? floorA : floorB;
           ctx.fillRect(sx, sy, TILE, TILE);
-
-          // faint grid line
-          ctx.fillStyle = "rgba(0,0,0,0.10)";
-          ctx.fillRect(sx, sy + TILE - 1, TILE, 1);
         }
 
         if (t === 3) {
           ctx.fillStyle = "rgba(124,92,255,0.14)";
           ctx.fillRect(sx + 6, sy + 6, TILE - 12, TILE - 12);
         } else if (t === 4) {
-          // pillar
-          var cx = sx + TILE * 0.5;
-          var cy = sy + TILE * 0.5;
-          var r = TILE * 0.28;
+          // pillar: chunky pixel orb + shadow
+          var cx = sx + (TILE >> 1);
+          var cy = sy + (TILE >> 1);
+          var r = (TILE * 0.28) | 0;
 
-          ctx.fillStyle = "rgba(0,0,0,0.25)";
-          ctx.beginPath();
-          ctx.ellipse(cx, cy + r * 1.2, r * 1.1, r * 0.65, 0, 0, TAU);
-          ctx.fill();
+          ctx.fillStyle = "rgba(0,0,0,0.30)";
+          ctx.fillRect(cx - r, cy + r, r * 2, r);
 
-          ctx.fillStyle = "rgba(255,255,255,0.06)";
-          ctx.beginPath();
-          ctx.arc(cx, cy, r, 0, TAU);
-          ctx.fill();
+          ctx.fillStyle = "rgba(255,255,255,0.07)";
+          ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
 
           ctx.fillStyle = "rgba(124,92,255,0.18)";
-          ctx.beginPath();
-          ctx.arc(cx - 1, cy - 2, r * 0.62, 0, TAU);
-          ctx.fill();
+          ctx.fillRect(cx - r + 2, cy - r + 2, r, r);
+        } else if (t === 5) {
+          ctx.fillStyle = deco;
+          ctx.fillRect(sx + 8, sy + 8, TILE - 16, TILE - 16);
         }
       }
     }
 
     drawDoorBars(room, camX, camY);
 
-    // shop set dressing
     if (node.kind === "shop") drawShopSet(camX, camY);
+    if (node.kind === "heal") drawFountainSet(node, camX, camY);
+    if (node.kind === "armory") drawArmorySet(node, camX, camY);
+
+    drawVignette();
   }
 
   function drawDoorBars(room, camX, camY) {
@@ -1156,47 +1042,146 @@
     var my = ROOM_H * 0.5;
     var span = DOOR_SPAN;
 
-    ctx.fillStyle = "rgba(255,80,140,0.22)";
-
-    if (room.neighbors.N && !room.doorsOpen.N) ctx.fillRect(mx - span - camX, 2 - camY, span * 2, 6);
-    if (room.neighbors.S && !room.doorsOpen.S) ctx.fillRect(mx - span - camX, ROOM_H - 8 - camY, span * 2, 6);
-    if (room.neighbors.W && !room.doorsOpen.W) ctx.fillRect(2 - camX, my - span - camY, 6, span * 2);
-    if (room.neighbors.E && !room.doorsOpen.E) ctx.fillRect(ROOM_W - 8 - camX, my - span - camY, 6, span * 2);
+    ctx.fillStyle = "rgba(255,80,140,0.24)";
+    if (room.neighbors.N && !room.doorsOpen.N) ctx.fillRect((mx - span - camX) | 0, (2 - camY) | 0, (span * 2) | 0, 6);
+    if (room.neighbors.S && !room.doorsOpen.S) ctx.fillRect((mx - span - camX) | 0, (ROOM_H - 8 - camY) | 0, (span * 2) | 0, 6);
+    if (room.neighbors.W && !room.doorsOpen.W) ctx.fillRect((2 - camX) | 0, (my - span - camY) | 0, 6, (span * 2) | 0);
+    if (room.neighbors.E && !room.doorsOpen.E) ctx.fillRect((ROOM_W - 8 - camX) | 0, (my - span - camY) | 0, 6, (span * 2) | 0);
   }
 
   function drawShopSet(camX, camY) {
-    var cx = ROOM_W * 0.5 - camX;
-    var cy = TILE * 2.5 - camY;
+    var cx = (ROOM_W * 0.5 - camX) | 0;
+    var cy = (TILE * 2.5 - camY) | 0;
 
-    // counter
-    ctx.fillStyle = "rgba(0,0,0,0.28)";
-    ctx.fillRect(cx - 70, cy + 14, 140, 10);
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(cx - 72, cy + 16, 144, 10);
 
-    ctx.fillStyle = "rgba(255,255,255,0.06)";
-    ctx.fillRect(cx - 70, cy + 2, 140, 14);
+    ctx.fillStyle = "rgba(255,255,255,0.08)";
+    ctx.fillRect(cx - 72, cy + 2, 144, 16);
 
-    // shopkeeper orb
-    ctx.fillStyle = "rgba(124,92,255,0.65)";
-    ctx.beginPath();
-    ctx.arc(cx, cy, 10, 0, TAU);
-    ctx.fill();
-
+    ctx.fillStyle = "rgba(124,92,255,0.75)";
+    ctx.fillRect(cx - 6, cy - 8, 12, 12);
     ctx.fillStyle = "rgba(255,255,255,0.35)";
     ctx.fillRect(cx - 2, cy - 6, 4, 2);
   }
 
+  function drawFountainSet(node, camX, camY) {
+    var cx = (ROOM_W * 0.5 - camX) | 0;
+    var cy = (ROOM_H * 0.5 - camY) | 0;
+
+    ctx.fillStyle = "rgba(0,0,0,0.30)";
+    ctx.fillRect(cx - 22, cy + 18, 44, 8);
+
+    // basin
+    ctx.fillStyle = "rgba(255,255,255,0.06)";
+    ctx.fillRect(cx - 24, cy - 12, 48, 24);
+
+    // water (or dried)
+    ctx.fillStyle = node.flags.fountainUsed ? "rgba(255,80,140,0.18)" : "rgba(120,255,170,0.22)";
+    ctx.fillRect(cx - 18, cy - 6, 36, 12);
+
+    // sparkle
+    if (!node.flags.fountainUsed) {
+      ctx.fillStyle = "rgba(255,255,255,0.22)";
+      ctx.fillRect(cx - 2, cy - 10, 4, 2);
+    }
+  }
+
+  function drawArmorySet(node, camX, camY) {
+    var cx = (ROOM_W * 0.5 - camX) | 0;
+    var cy = (TILE * 3.5 - camY) | 0;
+
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(cx - 26, cy + 22, 52, 8);
+
+    ctx.fillStyle = "rgba(255,255,255,0.07)";
+    ctx.fillRect(cx - 28, cy - 10, 56, 28);
+
+    ctx.fillStyle = node.flags.armoryUsed ? "rgba(255,80,140,0.25)" : "rgba(255,215,90,0.25)";
+    ctx.fillRect(cx - 20, cy - 2, 40, 12);
+
+    // latch
+    ctx.fillStyle = "rgba(255,255,255,0.20)";
+    ctx.fillRect(cx - 2, cy + 6, 4, 4);
+  }
+
   function drawVignette() {
-    // simple vignette: draw four big translucent rects
     ctx.fillStyle = "rgba(0,0,0,0.18)";
-    ctx.fillRect(0, 0, VIEW_W, 40);
-    ctx.fillRect(0, VIEW_H - 40, VIEW_W, 40);
-    ctx.fillRect(0, 0, 40, VIEW_H);
-    ctx.fillRect(VIEW_W - 40, 0, 40, VIEW_H);
+    ctx.fillRect(0, 0, VIEW_W, 44);
+    ctx.fillRect(0, VIEW_H - 44, VIEW_W, 44);
+    ctx.fillRect(0, 0, 44, VIEW_H);
+    ctx.fillRect(VIEW_W - 44, 0, 44, VIEW_H);
+  }
+
+  function drawEntities(camX, camY) {
+    // pickups
+    for (var i = 0; i < state.pickups.length; i++) {
+      var pk = state.pickups[i];
+      var px = (pk.x - camX) | 0, py = (pk.y - camY) | 0;
+
+      ctx.fillStyle = "rgba(0,0,0,0.32)";
+      ctx.fillRect(px - pk.r, py + 6, pk.r * 2, 4);
+
+      if (pk.t === "coin") {
+        ctx.fillStyle = "rgba(255,215,90,0.95)";
+        ctx.fillRect(px - 5, py - 5, 10, 10);
+        ctx.fillStyle = "rgba(255,255,255,0.30)";
+        ctx.fillRect(px - 2, py - 4, 4, 2);
+      } else {
+        ctx.fillStyle = "rgba(120,255,170,0.95)";
+        ctx.fillRect(px - 5, py - 5, 10, 10);
+      }
+    }
+
+    // enemies
+    for (i = 0; i < state.enemies.length; i++) {
+      var e = state.enemies[i];
+      var ex = (e.x - camX) | 0, ey = (e.y - camY) | 0;
+
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(ex - e.r, ey + e.r, e.r * 2, 5);
+
+      // sprite body
+      if (e.type === "shooter") ctx.fillStyle = "rgba(140,190,255,0.92)";
+      else ctx.fillStyle = "rgba(255,90,170,0.92)";
+      ctx.fillRect(ex - e.r, ey - e.r, e.r * 2, e.r * 2);
+
+      // highlight
+      ctx.fillStyle = "rgba(255,255,255,0.10)";
+      ctx.fillRect(ex - e.r + 2, ey - e.r + 2, e.r, e.r);
+
+      // eye
+      ctx.fillStyle = "rgba(0,0,0,0.28)";
+      ctx.fillRect(ex + (e.type === "shooter" ? 2 : -4), ey - 2, 3, 3);
+    }
+
+    // bullets
+    for (i = 0; i < state.bullets.length; i++) {
+      var b = state.bullets[i];
+      var bx = (b.x - camX) | 0, by = (b.y - camY) | 0;
+      ctx.fillStyle = (b.from === "player") ? "rgba(255,255,255,0.9)" : "rgba(255,200,90,0.9)";
+      ctx.fillRect(bx - 2, by - 2, 4, 4);
+    }
+
+    // player
+    var px2 = (player.x - camX) | 0, py2 = (player.y - camY) | 0;
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(px2 - player.r, py2 + player.r, player.r * 2, 5);
+
+    ctx.fillStyle = (player.invT > 0) ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.92)";
+    ctx.fillRect(px2 - player.r, py2 - player.r, player.r * 2, player.r * 2);
+
+    ctx.fillStyle = "rgba(124,92,255,0.22)";
+    ctx.fillRect(px2 - player.r + 2, py2 - player.r + 2, player.r, player.r);
+
+    // reticle
+    ctx.strokeStyle = "rgba(124,92,255,0.55)";
+    ctx.strokeRect((mouse.x - 8) | 0, (mouse.y - 8) | 0, 16, 16);
   }
 
   function drawHUD(node) {
     ctx.fillStyle = "rgba(0,0,0,0.45)";
-    ctx.fillRect(14, 12, 320, 74);
+    ctx.fillRect(14, 12, 360, 74);
 
     ctx.fillStyle = "rgba(255,255,255,0.9)";
     ctx.font = "14px system-ui, sans-serif";
@@ -1208,14 +1193,13 @@
     }
 
     ctx.fillStyle = "rgba(255,255,255,0.85)";
-    ctx.fillText("Coins: " + state.coins + "   Keys: " + state.keys, 24, 60);
+    ctx.fillText("Coins: " + state.coins, 24, 60);
 
     var w = WEAPONS[player.weapon];
-    var wname = w.name + (w.unlocked ? "" : " (LOCKED)");
-    ctx.fillText("Weapon: " + wname + "   (Q/E)", 180, 36);
+    ctx.fillText("Weapon: " + w.name + " (Q/E)", 170, 36);
 
     ctx.fillStyle = "rgba(255,255,255,0.65)";
-    ctx.fillText("Room: " + node.kind + "  Depth: " + node.depth + "  [" + state.roomId + "]", 180, 60);
+    ctx.fillText("Room: " + node.kind + "  Depth: " + node.depth + "  [" + state.roomId + "]", 170, 60);
 
     if (state.msgT > 0) {
       ctx.fillStyle = "rgba(255,255,255,0.9)";
@@ -1240,9 +1224,10 @@
       var ry = oy + 88 + n.y * (size + 3);
 
       var c = "rgba(255,255,255,0.22)";
-      if (n.kind === "shop") c = "rgba(124,92,255,0.32)";
-      if (n.kind === "start") c = "rgba(120,255,170,0.30)";
-      if (n.cleared) c = "rgba(255,255,255,0.35)";
+      if (n.kind === "shop") c = "rgba(124,92,255,0.35)";
+      if (n.kind === "heal") c = "rgba(120,255,170,0.30)";
+      if (n.kind === "armory") c = "rgba(255,215,90,0.30)";
+      if (n.kind === "start") c = "rgba(255,255,255,0.30)";
 
       ctx.fillStyle = c;
       ctx.fillRect(rx, ry, size, size);
@@ -1251,7 +1236,7 @@
     var cur = ensureNode(state.roomId);
     var cx = ox + 88 + cur.x * (size + 3);
     var cy = oy + 88 + cur.y * (size + 3);
-    ctx.fillStyle = "rgba(255,215,90,0.9)";
+    ctx.fillStyle = "rgba(255,80,140,0.9)";
     ctx.fillRect(cx - 2, cy - 2, size + 4, size + 4);
 
     ctx.fillStyle = "rgba(255,255,255,0.7)";
@@ -1261,10 +1246,26 @@
 
   function drawShopHint() {
     ctx.fillStyle = "rgba(0,0,0,0.40)";
-    ctx.fillRect(14, VIEW_H - 56, 360, 40);
+    ctx.fillRect(14, VIEW_H - 56, 440, 40);
     ctx.fillStyle = "rgba(255,255,255,0.85)";
     ctx.font = "14px system-ui, sans-serif";
-    ctx.fillText("SHOP — press F at the counter to trade coins", 24, VIEW_H - 30);
+    ctx.fillText("SHOP — press F at the counter. Buy with 1–4.", 24, VIEW_H - 30);
+  }
+
+  function drawHealHint(node) {
+    ctx.fillStyle = "rgba(0,0,0,0.40)";
+    ctx.fillRect(14, VIEW_H - 56, 520, 40);
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.font = "14px system-ui, sans-serif";
+    ctx.fillText(node.flags.fountainUsed ? "HEAL ROOM — fountain is used up." : "HEAL ROOM — press F at the fountain for a FREE full heal.", 24, VIEW_H - 30);
+  }
+
+  function drawArmoryHint(node) {
+    ctx.fillStyle = "rgba(0,0,0,0.40)";
+    ctx.fillRect(14, VIEW_H - 56, 560, 40);
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.font = "14px system-ui, sans-serif";
+    ctx.fillText(node.flags.armoryUsed ? "ARMORY — chest is empty." : "ARMORY — press F at the chest for a FREE weapon unlock.", 24, VIEW_H - 30);
   }
 
   function drawShopOverlay() {
@@ -1311,10 +1312,6 @@
 
       y += 72;
     }
-
-    ctx.fillStyle = "rgba(255,255,255,0.6)";
-    ctx.font = "13px system-ui, sans-serif";
-    ctx.fillText("Tip: clear combat rooms for coin drops. Shops appear once per depth ring.", 34, VIEW_H - 30);
   }
 
   function drawPause() {
@@ -1324,38 +1321,45 @@
     ctx.font = "26px system-ui, sans-serif";
     ctx.fillText("PAUSED", 34, 56);
     ctx.font = "14px system-ui, sans-serif";
-    ctx.fillText("ESC: resume   F: fullscreen   R: restart   Q/E: weapon   SPACE/SHIFT: dash", 34, 84);
+    ctx.fillText("ESC: resume   R: restart   Q/E: weapon   SPACE/SHIFT: dash", 34, 84);
   }
 
-  // ---------- Fullscreen + Resize ----------
-  function requestFullscreen() {
-    var d = document;
-    if (!d.fullscreenElement && canvas.requestFullscreen) {
-      canvas.requestFullscreen();
-    } else if (d.exitFullscreen) {
-      d.exitFullscreen();
-    }
+  function drawWatermark() {
+    var pad = 12;
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(VIEW_W - 280, VIEW_H - 44, 268, 32);
+    ctx.fillStyle = "rgba(255,255,255,0.70)";
+    ctx.font = "13px system-ui, sans-serif";
+    ctx.fillText(WATERMARK_TEXT, VIEW_W - 280 + pad, VIEW_H - 22);
   }
 
+  // ---------- Full-window Resize ----------
   function resize() {
     dpr = window.devicePixelRatio || 1;
 
-    // CSS size fills window
+    // full window
     var w = window.innerWidth;
     var h = window.innerHeight;
 
-    // Internal resolution for crispness
-    canvas.style.width = w + "px";
-    canvas.style.height = h + "px";
+    canvas.style.position = "fixed";
+    canvas.style.left = "0";
+    canvas.style.top = "0";
+    canvas.style.width = "100vw";
+    canvas.style.height = "100vh";
+
     canvas.width = (w * dpr) | 0;
     canvas.height = (h * dpr) | 0;
 
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // Reset transform then scale
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(dpr, dpr);
+
+    // crisp pixels
+    ctx.imageSmoothingEnabled = false;
 
     VIEW_W = w;
     VIEW_H = h;
 
-    // clamp camera (room stays fixed)
     state.cam.x = clamp(state.cam.x, 0, Math.max(0, ROOM_W - VIEW_W));
     state.cam.y = clamp(state.cam.y, 0, Math.max(0, ROOM_H - VIEW_H));
   }
@@ -1377,7 +1381,6 @@
     state.paused = false;
     state.shopOpen = false;
 
-    // reset weapons
     for (var i = 0; i < WEAPONS.length; i++) WEAPONS[i].unlocked = (WEAPONS[i].id === 0);
 
     player.x = ROOM_W / 2;
@@ -1425,14 +1428,9 @@
         document.body.appendChild(canvas);
       }
 
-      // full-window styling
       document.body.style.margin = "0";
       document.body.style.overflow = "hidden";
       document.body.style.background = "#07060b";
-      canvas.style.display = "block";
-      canvas.style.position = "fixed";
-      canvas.style.left = "0";
-      canvas.style.top = "0";
 
       ctx = canvas.getContext("2d");
 
