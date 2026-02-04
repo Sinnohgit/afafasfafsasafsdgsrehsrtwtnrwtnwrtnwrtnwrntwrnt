@@ -152,11 +152,11 @@
   // ---------- Rendering (pixel buffer) ----------
   const VIEW_W = 360;        // low-res width
   const VIEW_H = 216;        // low-res height
-  const TILE = 12;           // world tile size (world units)
-  const ROOM_TW = 17;        // room tiles width
-  const ROOM_TH = 13;        // room tiles height
-  const ROOM_W = ROOM_TW * TILE;
-  const ROOM_H = ROOM_TH * TILE;
+  const  = 12;           // world  size (world units)
+  const ROOM_TW = 17;        // room s width
+  const ROOM_TH = 13;        // room s height
+  const ROOM_W = ROOM_TW * ;
+  const ROOM_H = ROOM_TH * ;
 
   let canvas, ctx, low, lctx;
   function setSmooth(c, v) {
@@ -299,7 +299,7 @@
     { id:"homing_sig",  name:"Homing Sigil",tier:4, desc:"Bullets lightly home", apply: () => { player.homing += 0.35; } },
     { id:"pierce_pin",  name:"Pierce Pin",  tier:3, desc:"+1 pierce", apply: () => { player.pierce += 1; } },
     { id:"ricochet",    name:"Ricochet Chip",tier:2, desc:"+1 bounce", apply: () => { player.bounce += 1; } },
-    { id:"split_core",  name:"Split Core",  tier:4, desc:"Extra projectile per shot", apply: () => { player.bulletsPerShotAdd += 1; player.spreadMul *= 1.15; } },
+    { id:"split_core",  name:"Split Core",  tier:4, desc:"Extra projec per shot", apply: () => { player.bulletsPerShotAdd += 1; player.spreadMul *= 1.15; } },
   ];
 
   function giveItem(itemId) {
@@ -420,7 +420,7 @@
     return { nodes, edges, startKey: "0,0" };
   }
 
-  // Room tile types (local to a room):
+  // Room  types (local to a room):
   // 0 wall, 1 floor, 2 pit, 3 neon puddle (hazard slow + chip), 4 obstacle block, 5 door frame
   function genRoomTiles(kind) {
     const w = ROOM_TW, h = ROOM_TH;
@@ -478,6 +478,25 @@
 
     return g;
   }
+function isSolidAtPoint(wx, wy, room) {
+  const tx = (wx / TILE) | 0;
+  const ty = (wy / TILE) | 0;
+  if (tx < 0 || ty < 0 || tx >= ROOM_TW || ty >= ROOM_TH) return true;
+
+  const t = room.g[tileIndex(tx, ty)];
+  if (t === 0 || t === 2) return true; // wall/pit
+
+  if (t === 4) {
+    // SMALL pillar obstacle centered in tile (smaller than full TILE)
+    const cx = tx * TILE + TILE * 0.5;
+    const cy = ty * TILE + TILE * 0.5;
+    const dx = wx - cx, dy = wy - cy;
+    const rad = TILE * 0.28; // <-- obstacle size knob (smaller = easier)
+    return (dx * dx + dy * dy) <= rad * rad;
+  }
+
+  return false;
+}
 
   function tileIndex(x,y){ return x + y*ROOM_TW; }
   function tileAtWorld(wx, wy, room) {
@@ -490,20 +509,17 @@
     const t = tileAtWorld(wx, wy, room);
     return t === 1 || t === 3 || t === 5; // floor / neon puddle / door frame tile is still floor-ish
   }
-  function collideCircle(x,y,r,room) {
-    // sample around circle
-    const samples = 10;
-    for (let i=0;i<samples;i++){
-      const a = (i/samples)*TAU;
-      const px = x + Math.cos(a)*r;
-      const py = y + Math.sin(a)*r;
-      const t = tileAtWorld(px,py,room);
-      if (t===0 || t===2 || t===4) return true; // wall/pit/block collide
-      // door lock collision is handled separately (room.doorsOpen)
-      // We'll treat locked doors as walls using a door collider rectangle
-    }
-    return false;
+  function collideCircle(x, y, r, room) {
+  const samples = 12;
+  for (let i = 0; i < samples; i++) {
+    const a = (i / samples) * TAU;
+    const px = x + Math.cos(a) * r;
+    const py = y + Math.sin(a) * r;
+    if (isSolidAtPoint(px, py, room)) return true;
   }
+  return false;
+}
+
 
   // ---------- Entities ----------
   function makeBullet(owner, x,y,vx,vy, dmg, life, opts) {
@@ -1186,30 +1202,37 @@ function tryDoorTransition(room) {
   const node = getRoomNode(state.roomId);
   if (!node) return;
 
-  // Detect doorway crossing
-  const nearTop   = player.y < 8 && Math.abs(player.x - ROOM_W * 0.5) < 18;
-  const nearBot   = player.y > ROOM_H - 8 && Math.abs(player.x - ROOM_W * 0.5) < 18;
-  const nearLeft  = player.x < 8 && Math.abs(player.y - ROOM_H * 0.5) < 18;
-  const nearRight = player.x > ROOM_W - 8 && Math.abs(player.y - ROOM_H * 0.5) < 18;
+  // Door opening spans (in world coords)
+  const doorSpan = 18;
+  const inTopDoor   = Math.abs(player.x - ROOM_W * 0.5) < doorSpan;
+  const inBotDoor   = Math.abs(player.x - ROOM_W * 0.5) < doorSpan;
+  const inLeftDoor  = Math.abs(player.y - ROOM_H * 0.5) < doorSpan;
+  const inRightDoor = Math.abs(player.y - ROOM_H * 0.5) < doorSpan;
 
-  // Save current room “live” arrays so re-entering doesn't stack/glitch
+  // Must actually cross boundary to trigger
+  const crossTop   = (player.y < 0) && inTopDoor;
+  const crossBot   = (player.y > ROOM_H) && inBotDoor;
+  const crossLeft  = (player.x < 0) && inLeftDoor;
+  const crossRight = (player.x > ROOM_W) && inRightDoor;
+
   function stashRoom(roomId) {
     const r = getRoom(roomId);
     if (!r) return;
+
+    // Cache "world state" for returning later.
     r.__cache = {
       enemies: state.enemies.slice(),
-      bullets: state.bullets.slice(),
       pickups: state.pickups.slice(),
-      fx: state.fx.slice(),
       decals: state.decals.slice(),
+      // NOTE: intentionally NOT caching bullets/fx to avoid room-to-room clutter
     };
   }
 
-  // Load next room arrays (or clear for fresh spawn)
   function loadRoom(roomId) {
     const r = getRoom(roomId);
     if (!r) return;
 
+    // Always start by clearing the live arrays: only current room is "alive"
     state.enemies.length = 0;
     state.bullets.length = 0;
     state.pickups.length = 0;
@@ -1217,16 +1240,13 @@ function tryDoorTransition(room) {
     state.decals.length = 0;
 
     if (r.__cache) {
-      // Restore cached room state (prevents stacking/ghost rooms)
       for (const e of r.__cache.enemies) state.enemies.push(e);
-      for (const b of r.__cache.bullets) state.bullets.push(b);
       for (const p of r.__cache.pickups) state.pickups.push(p);
-      for (const f of r.__cache.fx) state.fx.push(f);
       for (const d of r.__cache.decals) state.decals.push(d);
       return;
     }
 
-    // Fresh room => spawn contents once
+    // Fresh room spawn
     spawnRoomContents(roomId);
   }
 
@@ -1236,11 +1256,32 @@ function tryDoorTransition(room) {
     const nextNode = getRoomNode(nid);
     if (!nextNode) return;
 
+    // Respect door open state
+    // (If you want locked doors to still “bump” you, keep this strict)
+    const dir =
+      dirFrom === "N" ? "N" :
+      dirFrom === "S" ? "S" :
+      dirFrom === "W" ? "W" : "E";
+
+    if (!room.neighbors[dir] || !room.doorsOpen[dir]) {
+      // push player back inside instead of letting them drift OOB
+      if (dirFrom === "N") player.y = 2;
+      if (dirFrom === "S") player.y = ROOM_H - 2;
+      if (dirFrom === "W") player.x = 2;
+      if (dirFrom === "E") player.x = ROOM_W - 2;
+      return;
+    }
+
     // Treasure lock check (consume key only when entering)
     if (nextNode.kind === "treasure" && nextNode.locked && !nextNode.cleared) {
       if (state.keys <= 0) {
         state.msg = "TREASURE LOCKED — NEED KEY";
         state.msgT = 1.0;
+        // bounce back inside
+        if (dirFrom === "N") player.y = 2;
+        if (dirFrom === "S") player.y = ROOM_H - 2;
+        if (dirFrom === "W") player.x = 2;
+        if (dirFrom === "E") player.x = ROOM_W - 2;
         return;
       }
       state.keys -= 1;
@@ -1249,32 +1290,35 @@ function tryDoorTransition(room) {
       state.msgT = 1.0;
     }
 
-    // IMPORTANT: stash current room arrays BEFORE switching
+    // Cache current room BEFORE switching
     stashRoom(state.roomId);
 
-    // Switch
+    // Switch room
     state.roomId = nid;
     nextNode.seen = true;
 
-    // Reposition player to opposite side
+    // Place player just inside new room on opposite side
     if (dirFrom === "N") { player.y = ROOM_H - 14; player.x = clamp(player.x, 14, ROOM_W - 14); }
     if (dirFrom === "S") { player.y = 14;          player.x = clamp(player.x, 14, ROOM_W - 14); }
     if (dirFrom === "W") { player.x = ROOM_W - 14; player.y = clamp(player.y, 14, ROOM_H - 14); }
     if (dirFrom === "E") { player.x = 14;          player.y = clamp(player.y, 14, ROOM_H - 14); }
 
-    // Reset camera instantly to reduce “old room smear” feeling
+    // Hard snap camera to avoid “smear”
     state.cam.x = clamp(player.x - VIEW_W / 2, 0, ROOM_W - VIEW_W);
     state.cam.y = clamp(player.y - VIEW_H / 2, 0, ROOM_H - VIEW_H);
+    state.cam.shake = 0;
+    state.cam.shakeT = 0;
 
-    // Load new room (restore cache OR spawn fresh)
+    // Load new room (restore cache OR spawn)
     loadRoom(state.roomId);
   }
 
-  if (nearTop && room.neighbors.N && room.doorsOpen.N) go(0, -1, "N");
-  else if (nearBot && room.neighbors.S && room.doorsOpen.S) go(0,  1, "S");
-  else if (nearLeft && room.neighbors.W && room.doorsOpen.W) go(-1, 0, "W");
-  else if (nearRight && room.neighbors.E && room.doorsOpen.E) go(1,  0, "E");
+  if (crossTop)   go(0, -1, "N");
+  else if (crossBot)   go(0,  1, "S");
+  else if (crossLeft)  go(-1, 0, "W");
+  else if (crossRight) go(1,  0, "E");
 }
+
 
 
   // ---------- UI / Screens ----------
@@ -1592,11 +1636,18 @@ function tryDoorTransition(room) {
             lctx.fillStyle = "rgba(255,59,212,0.08)";
             lctx.fillRect(sx+4,sy+4,TILE-8,TILE-8);
           } else if (t===4) {
-            lctx.fillStyle = "rgba(255,255,255,0.05)";
-            lctx.fillRect(sx+1,sy+1,TILE-2,TILE-2);
-            lctx.fillStyle = "rgba(124,92,255,0.22)";
-            lctx.fillRect(sx+3,sy+3,TILE-6,TILE-6);
-          } else if (t===5) {
+  // smaller pillar obstacle (matches collision size)
+  const px = sx + (TILE * 0.5);
+  const py = sy + (TILE * 0.5);
+  const r = TILE * 0.28;
+
+  lctx.fillStyle = "rgba(255,255,255,0.06)";
+  lctx.fillRect((px - r) | 0, (py - r) | 0, (r * 2) | 0, (r * 2) | 0);
+
+  lctx.fillStyle = "rgba(124,92,255,0.22)";
+  lctx.fillRect((px - r * 0.65) | 0, (py - r * 0.65) | 0, (r * 1.3) | 0, (r * 1.3) | 0);
+}
+ else if (t===5) {
             lctx.fillStyle = "rgba(255,204,0,0.10)";
             lctx.fillRect(sx,sy,TILE,TILE);
           }
@@ -1953,8 +2004,8 @@ function tryDoorTransition(room) {
       const ny = b.y + b.vy*dt;
 
       // collision with walls/blocks/pits
-      const tt = tileAtWorld(nx, ny, room);
-      const solid = (tt===0 || tt===2 || tt===4);
+      const solid = isSolidAtPoint(nx, ny, room);
+
       if (solid) {
         // bounce for player bullets
         if (b.owner==="p" && b.bounce > 0) {
